@@ -14,9 +14,8 @@ export default function Home() {
           <p className="max-w-2xl text-base leading-relaxed text-neutral-600 dark:text-neutral-400">
             Use the structured form (with a radial slider) plus optional notes—the
             model still massages intent into anchored Places queries before Google
-            returns real storefront contacts. After curating rows, enrichment quietly
-            fetches those public storefront pages (plus sibling contact URLs) looking
-            for plain-text mailboxes.
+            returns real storefront contacts. We scrape each site for a public inbox
+            first—only businesses with a found email reach your review table.
           </p>
         </header>
 
@@ -43,9 +42,8 @@ export default function Home() {
               OPENAI_MODEL
             </code>
             {""}
-            optionally. Enrichment curls shortlisted storefront URLs (homepage + light
-            /contact probes) sniffing plaintext inboxes—respect crawl etiquette. Keep
-            secrets in {""}
+            optionally. Shortlist review + CSV export happen after the email filter.
+            Keep secrets in {""}
             <code className="rounded-md bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400">
               .env.local
             </code>

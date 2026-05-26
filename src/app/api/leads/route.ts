@@ -15,6 +15,7 @@ import {
   uniqueGeographies,
 } from "@/lib/leads-geography";
 import { buildEnrichmentPlan } from "@/lib/openai-plan";
+import { retainCompaniesWithScrapedEmail } from "@/lib/scrape/filter-with-email";
 
 export const runtime = "nodejs";
 
@@ -246,9 +247,23 @@ export async function POST(req: Request) {
     );
   });
 
-  companies.sort((a, b) =>
-    a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-  );
+  const preScrapeCount = companies.length;
+
+  const { companies: emailReady, stats: scrapeStats, warnings: scrapeWarnings } =
+    await retainCompaniesWithScrapedEmail(companies);
+
+  companies = emailReady;
+  warnings.push(...scrapeWarnings);
+
+  if (preScrapeCount > 0 && companies.length === 0) {
+    warnings.push(
+      `Checked ${scrapeStats.scrapedAttempts} storefront${scrapeStats.scrapedAttempts === 1 ? "" : "s"} (${scrapeStats.skippedNoWebsite} lacked a website). None exposed a scrapeable email on public pages.`,
+    );
+  } else if (scrapeStats.droppedNoEmail > 0) {
+    warnings.push(
+      `Filtered out ${scrapeStats.droppedNoEmail} listing${scrapeStats.droppedNoEmail === 1 ? "" : "s"} with no plaintext email on their site.`,
+    );
+  }
 
   const totalJobs = geographies.length * queryTexts.length;
   const truncated =
@@ -260,6 +275,7 @@ export async function POST(req: Request) {
     searchCallsMade,
     truncated,
     warnings,
+    scrapeStats,
     companies,
   });
 }

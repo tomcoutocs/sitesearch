@@ -10,6 +10,14 @@ import {
   type OutreachChannel,
 } from "@/lib/compose-search-briefing";
 
+type EmailScrapeStats = {
+  placesCandidates: number;
+  skippedNoWebsite: number;
+  scrapedAttempts: number;
+  withEmail: number;
+  droppedNoEmail: number;
+};
+
 type LeadsResponse =
   | {
       summary: string;
@@ -18,30 +26,17 @@ type LeadsResponse =
       warnings: string[];
       truncated: boolean;
       searchCallsMade: number;
+      scrapeStats: EmailScrapeStats;
     }
   | {
       error: string;
       issues?: unknown;
     };
 
-type EnrichResponse =
-  | {
-      results: Array<{
-        placeResourceName: string;
-        email: string | null;
-        confidence: number | null;
-        note: string | null;
-      }>;
-      warnings: string[];
-    }
-  | { error: string };
-
 type ReviewPhase = "pending" | "approved" | "removed";
 
 type WorkspaceRow = CompanyRow & {
   review: ReviewPhase;
-  enrichedEmail: string | null;
-  enrichNote: string | null;
 };
 
 const MIN_RADIUS_MI = 5;
@@ -67,8 +62,6 @@ function initialsFromCompanies(companies: CompanyRow[]): WorkspaceRow[] {
   return companies.map((c) => ({
     ...c,
     review: "pending" as ReviewPhase,
-    enrichedEmail: null,
-    enrichNote: null,
   }));
 }
 
@@ -98,13 +91,12 @@ export function LeadFinderForm() {
     profession: string;
     truncated: boolean;
     searchCallsMade: number;
+    scrapeStats: EmailScrapeStats | null;
   } | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const [enrichBusy, setEnrichBusy] = useState(false);
-  const [enrichmentRan, setEnrichmentRan] = useState(false);
 
   const reviewStats = useMemo(() => {
     let pending = 0;
@@ -137,14 +129,12 @@ export function LeadFinderForm() {
 
     if (!shortlist.length) return "";
 
-    const header =
-      "name,phone,email,enriched_email,website,address";
+    const header = "name,phone,email,website,address";
     const bodyLines = shortlist.map((row) =>
       [
         escapeCsv(row.name),
         escapeCsv(row.phone ?? ""),
         escapeCsv(row.email ?? ""),
-        escapeCsv(row.enrichedEmail ?? ""),
         escapeCsv(row.websiteUrl ?? ""),
         escapeCsv(row.address),
       ].join(","),
@@ -159,11 +149,8 @@ export function LeadFinderForm() {
   const allDispositioned =
     rows.length > 0 && reviewStats.pending === 0;
 
-  const canRunEnrichment =
-    allDispositioned &&
-    reviewStats.approved > 0 &&
-    !enrichBusy &&
-    !enrichmentRan;
+  const canExportCsv =
+    allDispositioned && reviewStats.approved > 0 && Boolean(csvPayload);
 
   function bumpReview(id: string, review: ReviewPhase) {
     setRows((prev) =>
@@ -182,62 +169,6 @@ export function LeadFinderForm() {
     setAdditionalNotes(
       "Websites stuck on old WordPress layouts or missing HTTPS badges are juicy.",
     );
-  }
-
-  async function runEmailEnrichment() {
-    const approvedSlice = rows.filter((row) => row.review === "approved");
-    if (!approvedSlice.length || !canRunEnrichment) return;
-
-    setEnrichBusy(true);
-    setError(null);
-
-    try {
-      const res = await fetch("/api/enrich-emails", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: approvedSlice.map((row) => ({
-            placeResourceName: row.placeResourceName,
-            name: row.name,
-            websiteUrl: row.websiteUrl,
-          })),
-        }),
-      });
-
-      const data = (await res.json()) as EnrichResponse;
-
-      if (!res.ok || !("results" in data)) {
-        setError(
-          "error" in data ? data.error : `Email enrichment failed (${res.status})`,
-        );
-        return;
-      }
-
-      const merged = new Map(
-        data.results.map((hit) => [hit.placeResourceName, hit] as const),
-      );
-
-      setRows((prev) =>
-        prev.map((row) => {
-          const note = merged.get(row.placeResourceName);
-          if (!note) return row;
-          return {
-            ...row,
-            enrichedEmail: note.email ?? row.enrichedEmail,
-            enrichNote: note.note ?? row.enrichNote,
-          };
-        }),
-      );
-
-      const extraWarnings = [...(data.warnings ?? [])];
-
-      setWarnings((prev) => [...prev, ...extraWarnings]);
-      setEnrichmentRan(true);
-    } catch {
-      setError("Network error while enriching — try again.");
-    } finally {
-      setEnrichBusy(false);
-    }
   }
 
   async function onSubmit(e: FormEvent) {
@@ -273,7 +204,6 @@ export function LeadFinderForm() {
         setRows([]);
         setMeta(null);
         setWarnings([]);
-        setEnrichmentRan(false);
         return;
       }
 
@@ -286,7 +216,6 @@ export function LeadFinderForm() {
         setRows([]);
         setMeta(null);
         setWarnings([]);
-        setEnrichmentRan(false);
         return;
       }
 
@@ -296,15 +225,14 @@ export function LeadFinderForm() {
         profession: data.profession,
         truncated: data.truncated,
         searchCallsMade: data.searchCallsMade,
+        scrapeStats: data.scrapeStats ?? null,
       });
       setWarnings(data.warnings);
-      setEnrichmentRan(false);
     } catch {
       setError("Network error — try again.");
       setRows([]);
       setMeta(null);
       setWarnings([]);
-      setEnrichmentRan(false);
     } finally {
       setBusy(false);
     }
@@ -316,8 +244,7 @@ export function LeadFinderForm() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    const stamp = enrichmentRan ? "shortlist-enriched" : "shortlist";
-    a.download = `leads-${stamp}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `leads-shortlist-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -344,8 +271,9 @@ export function LeadFinderForm() {
               Dial in the hunt
             </h2>
             <p className="max-w-xl text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
-              Give structured inputs—GPT still massages them into anchored
-              queries, Places returns real storefront data.
+              Places finds candidates, then we scrape each website for a public
+              inbox before anything hits your review table—only rows with a found
+              email appear.
             </p>
           </div>
           <button
@@ -493,7 +421,7 @@ export function LeadFinderForm() {
               disabled={disableSubmit}
               className="inline-flex h-11 cursor-pointer items-center justify-center rounded-full bg-neutral-950 px-6 text-sm font-medium text-neutral-50 transition hover:bg-neutral-800 disabled:pointer-events-none disabled:opacity-40 dark:bg-neutral-50 dark:text-neutral-950 dark:hover:bg-neutral-200"
             >
-              {busy ? "Searching Places…" : "Find companies"}
+              {busy ? "Searching & scraping emails…" : "Find companies with emails"}
             </button>
           </div>
         </form>
@@ -528,9 +456,13 @@ export function LeadFinderForm() {
             {meta.profession} · {meta.summary}
           </p>
           <p className="text-xs text-neutral-500 dark:text-neutral-400">
-            {reviewStats.total} companies after filters · fired {meta.searchCallsMade}{" "}
-            Google Text Search lookups
-            {meta.truncated ? " · capped lookup budget, broaden/narrow rerun if needed" : ""}
+            {reviewStats.total} with scrapeable emails in your table
+            {meta.scrapeStats
+              ? ` · ${meta.scrapeStats.withEmail} kept from ${meta.scrapeStats.placesCandidates} Places hits (${meta.scrapeStats.droppedNoEmail} sites had no public inbox, ${meta.scrapeStats.skippedNoWebsite} lacked a website)`
+              : ""}
+            {" · "}
+            {meta.searchCallsMade} Google Text Search lookups
+            {meta.truncated ? " · capped lookup budget" : ""}
           </p>
         </div>
       ) : null}
@@ -549,68 +481,48 @@ export function LeadFinderForm() {
                 </span>
               </div>
               <p className="max-w-2xl text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
-                Inspect each site posture. Anything worth pitching moves to&nbsp;
+                Every row already has a scraped email. Open the site, decide if it
+                needs a refresh, then&nbsp;
                 <span className="font-semibold text-neutral-800 dark:text-neutral-200">
                   Shortlist
-                </span>
-                ; declutter with&nbsp;
+                </span>{" "}
+                or&nbsp;
                 <span className="font-semibold text-neutral-800 dark:text-neutral-200">
                   Remove
                 </span>
-                . The single sweep curls each shortlisted homepage (plus lightweight
-                /contact guesses) once every row is dispositioned—it runs once per Places
-                pull so auditing stays repeatable.
+                . Export unlocks once every row is dispositioned.
               </p>
               {reviewStats.pending > 0 ? (
                 <p className="text-[11px] font-semibold text-rose-700 dark:text-rose-400">
                   {reviewStats.pending} lead{reviewStats.pending === 1 ? "" : "s"}{" "}
-                  awaiting a decision — finish review to unlock enrichment.
+                  awaiting a decision — finish review to export CSV.
                 </p>
               ) : reviewStats.total > 0 && reviewStats.approved === 0 ? (
                 <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-                  Every lead was removed — add at least one shortlist candidate to enrich.
+                  Every lead was removed — shortlist at least one to export.
                 </p>
-              ) : enrichmentRan ? (
+              ) : allDispositioned && reviewStats.approved > 0 ? (
                 <p className="text-[11px] font-semibold text-emerald-900 dark:text-emerald-400">
-                  Enrichment complete for this batch. Export CSV or rerun a fresh Places search if you tweak targeting.
+                  Review complete — export your shortlist CSV anytime.
                 </p>
               ) : null}
             </div>
 
             <div className="flex shrink-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
-              {csvPayload ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={downloadCsv}
-                  title="Downloads approved shortlist with phones, sites, scraped emails."
-                  className="inline-flex h-11 items-center justify-center rounded-full border border-neutral-950/15 bg-neutral-950 px-6 text-sm font-semibold text-white shadow-sm shadow-neutral-900/35 transition hover:bg-neutral-800 disabled:pointer-events-none disabled:opacity-40 dark:border-neutral-100/20 dark:bg-neutral-950 dark:text-neutral-50 dark:hover:bg-neutral-800"
-                >
-                  Export shortlist CSV
-                </button>
-              ) : null}
               <button
                 type="button"
-                disabled={!canRunEnrichment}
+                disabled={!canExportCsv || busy}
+                onClick={downloadCsv}
                 title={
-                  enrichmentRan
-                    ? "Enrichment already completed for these Places results. Run another search or export CSV."
-                    : enrichBusy
-                      ? undefined
-                      : reviewStats.pending > 0
-                        ? "Approve or remove every company before enriching."
-                        : reviewStats.approved === 0
-                          ? "Shortlist at least one company worth pitching."
-                          : undefined
+                  !allDispositioned
+                    ? "Approve or remove every company before exporting."
+                    : reviewStats.approved === 0
+                      ? "Shortlist at least one company to export."
+                      : "Downloads approved shortlist with phones, emails, sites."
                 }
-                onClick={() => void runEmailEnrichment()}
-                className="inline-flex h-11 items-center justify-center rounded-full bg-indigo-600 px-6 text-sm font-semibold text-white shadow-sm shadow-indigo-900/40 transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:text-neutral-600 dark:bg-indigo-500 dark:text-white dark:shadow-indigo-900/40 dark:hover:bg-indigo-400 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-300"
+                className="inline-flex h-11 items-center justify-center rounded-full border border-neutral-950/15 bg-neutral-950 px-6 text-sm font-semibold text-white shadow-sm shadow-neutral-900/35 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:text-neutral-600 dark:border-neutral-100/20 dark:bg-neutral-950 dark:text-neutral-50 dark:hover:bg-neutral-800 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-300"
               >
-                {enrichBusy
-                  ? "Scanning sites…"
-                  : enrichmentRan
-                    ? "Enrichment locked"
-                    : "Sweep sites for plaintext emails"}
+                Export shortlist CSV
               </button>
             </div>
           </div>
@@ -695,7 +607,7 @@ export function LeadFinderForm() {
                             </span>
                             <button
                               type="button"
-                              disabled={busy || enrichmentRan}
+                              disabled={busy}
                               onClick={() =>
                                 bumpReview(row.placeResourceName, "pending")
                               }
@@ -711,7 +623,7 @@ export function LeadFinderForm() {
                             </span>
                             <button
                               type="button"
-                              disabled={busy || enrichmentRan}
+                              disabled={busy}
                               onClick={() =>
                                 bumpReview(row.placeResourceName, "pending")
                               }
@@ -739,35 +651,18 @@ export function LeadFinderForm() {
                       )}
                     </td>
                     <td className="px-3 py-3 align-top text-neutral-700 dark:text-neutral-300">
-                      {(() => {
-                        const resolved = row.enrichedEmail ?? row.email;
-                        return resolved ? (
-                          <span className="break-all">{resolved}</span>
-                        ) : (
-                          <span className="block text-neutral-400">
-                            {reviewStats.pending > 0
-                              ? "Finish triage first"
-                              : row.review === "removed"
-                                ? "Dropped"
-                                : enrichmentRan
-                                  ? "Nothing on public pages"
-                                  : "Sweep pending"}
-                          </span>
-                        );
-                      })()}
-                      {row.enrichNote && row.enrichedEmail ? (
-                        <p className="mt-1 text-[10px] text-neutral-400">
-                          {row.enrichNote}
-                        </p>
-                      ) : null}
-                      {row.enrichNote &&
-                      !row.enrichedEmail &&
-                      enrichmentRan &&
-                      row.review === "approved" ? (
-                        <p className="mt-1 text-[10px] text-amber-800 dark:text-amber-300">
-                          {row.enrichNote}
-                        </p>
-                      ) : null}
+                      {row.email ? (
+                        <>
+                          <span className="break-all">{row.email}</span>
+                          {row.emailSource ? (
+                            <p className="mt-1 text-[10px] text-neutral-400">
+                              {row.emailSource}
+                            </p>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="text-neutral-400">—</span>
+                      )}
                     </td>
                     <td className="px-3 py-3 align-top">
                       {row.websiteUrl ? (
@@ -800,10 +695,9 @@ export function LeadFinderForm() {
 
       {!busy && meta && sortedRows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-neutral-300 px-5 py-4 text-center text-sm text-neutral-600 dark:border-neutral-700 dark:text-neutral-300">
-          No rows survived the filters implied by your form (often the GPT pass
-          asked for&nbsp;
-          <span className="font-medium">&quot;must have website&quot;</span>
-          ).
+          No companies with a scrapeable public email matched this search. Try a
+          broader profession, different corridor, or check the heads-up notes for
+          how many sites were skipped.
         </p>
       ) : null}
     </div>

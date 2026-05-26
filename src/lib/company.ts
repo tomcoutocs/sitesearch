@@ -5,7 +5,9 @@ export type CompanyRow = {
   address: string;
   /** E.164 or national spacing per Google Places */
   phone: string | null;
-  /** Google does not reliably expose mailbox addresses */
+  /** Scraped from public storefront HTML when present */
   email: string | null;
+  /** Where the mailbox was discovered (path + heuristic confidence) */
+  emailSource: string | null;
   websiteUrl: string | null;
 };

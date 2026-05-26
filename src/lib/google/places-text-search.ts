@@ -76,6 +76,7 @@ export async function searchTextNearby(params: {
       address: (p.formattedAddress ?? "").trim(),
       phone: (p.nationalPhoneNumber ?? "").trim() || null,
       email: null,
+      emailSource: null,
       websiteUrl: (p.websiteUri ?? "").trim() || null,
     });
   }
