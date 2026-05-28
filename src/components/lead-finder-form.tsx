@@ -9,6 +9,7 @@ import {
   outreachChannelValues,
   type OutreachChannel,
 } from "@/lib/compose-search-briefing";
+import type { LeadsStreamEvent } from "@/lib/leads-stream";
 
 type EmailScrapeStats = {
   placesCandidates: number;
@@ -18,20 +19,79 @@ type EmailScrapeStats = {
   droppedNoEmail: number;
 };
 
-type LeadsResponse =
-  | {
-      summary: string;
-      profession: string;
-      companies: CompanyRow[];
-      warnings: string[];
-      truncated: boolean;
-      searchCallsMade: number;
-      scrapeStats: EmailScrapeStats;
+type SearchProgress = {
+  phase: "places" | "scraping";
+  checked: number;
+  total: number;
+  found: number;
+  currentName?: string;
+};
+
+async function consumeLeadsStream(
+  response: Response,
+  onEvent: (event: LeadsStreamEvent) => void,
+) {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!response.ok) {
+    if (contentType.includes("application/json")) {
+      const body = (await response.json()) as {
+        error?: string;
+        issues?: unknown;
+      };
+      onEvent({
+        type: "error",
+        error: body.error ?? `Request failed (${response.status})`,
+        issues: body.issues,
+      });
+      return;
     }
-  | {
-      error: string;
-      issues?: unknown;
-    };
+
+    onEvent({
+      type: "error",
+      error: `Request failed (${response.status})`,
+    });
+    return;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    onEvent({ type: "error", error: "Empty response from server." });
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.length) continue;
+
+      try {
+        onEvent(JSON.parse(trimmed) as LeadsStreamEvent);
+      } catch {
+        // ignore malformed chunks
+      }
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail.length) {
+    try {
+      onEvent(JSON.parse(tail) as LeadsStreamEvent);
+    } catch {
+      // ignore
+    }
+  }
+}
 
 type ReviewPhase = "pending" | "approved" | "removed";
 
@@ -58,11 +118,8 @@ function escapeCsv(field: string) {
   return needsQuotes ? `"${sanitized}"` : sanitized;
 }
 
-function initialsFromCompanies(companies: CompanyRow[]): WorkspaceRow[] {
-  return companies.map((c) => ({
-    ...c,
-    review: "pending" as ReviewPhase,
-  }));
+function toWorkspaceRow(company: CompanyRow): WorkspaceRow {
+  return { ...company, review: "pending" };
 }
 
 function reviewRank(phase: ReviewPhase) {
@@ -97,6 +154,10 @@ export function LeadFinderForm() {
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const [searchPhase, setSearchPhase] = useState<string | null>(null);
+  const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(
+    null,
+  );
 
   const reviewStats = useMemo(() => {
     let pending = 0;
@@ -110,15 +171,15 @@ export function LeadFinderForm() {
     return { pending, approved, removed, total: rows.length };
   }, [rows]);
 
-  const sortedRows = useMemo(
+  const displayRows = useMemo(
     () =>
-      [...rows].sort((a, b) => {
-        const rr = reviewRank(a.review) - reviewRank(b.review);
-        if (rr !== 0) return rr;
-        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      }),
+      [...rows].sort(
+        (a, b) => reviewRank(a.review) - reviewRank(b.review),
+      ),
     [rows],
   );
+
+  const showResultsPanel = busy || rows.length > 0;
 
   const csvPayload = useMemo(() => {
     const shortlist = rows
@@ -176,6 +237,11 @@ export function LeadFinderForm() {
     setBusy(true);
     setError(null);
     setIssues(null);
+    setRows([]);
+    setMeta(null);
+    setWarnings([]);
+    setSearchPhase("Starting search…");
+    setSearchProgress(null);
 
     const payload = {
       profession,
@@ -194,45 +260,80 @@ export function LeadFinderForm() {
         body: JSON.stringify(payload),
       });
 
-      const data = (await res.json()) as LeadsResponse;
+      await consumeLeadsStream(res, (event) => {
+        switch (event.type) {
+          case "phase":
+            setSearchPhase(event.message);
+            if (event.phase !== "scraping") {
+              setSearchProgress(null);
+            }
+            break;
 
-      if (!res.ok) {
-        if ("issues" in data && data.issues) setIssues(data.issues);
-        setError(
-          "error" in data ? data.error : `Request failed (${res.status})`,
-        );
-        setRows([]);
-        setMeta(null);
-        setWarnings([]);
-        return;
-      }
+          case "progress":
+            setSearchProgress({
+              phase: event.phase,
+              checked: event.checked,
+              total: event.total,
+              found: event.found,
+              currentName: event.currentName,
+            });
+            break;
 
-      if (
-        !("companies" in data) ||
-        !Array.isArray(data.companies) ||
-        typeof data.summary !== "string"
-      ) {
-        setError("Unexpected response shape.");
-        setRows([]);
-        setMeta(null);
-        setWarnings([]);
-        return;
-      }
+          case "company":
+            setRows((prev) => {
+              if (
+                prev.some(
+                  (row) =>
+                    row.placeResourceName === event.company.placeResourceName,
+                )
+              ) {
+                return prev;
+              }
+              return [...prev, toWorkspaceRow(event.company)];
+            });
+            break;
 
-      setRows(initialsFromCompanies(data.companies));
-      setMeta({
-        summary: data.summary,
-        profession: data.profession,
-        truncated: data.truncated,
-        searchCallsMade: data.searchCallsMade,
-        scrapeStats: data.scrapeStats ?? null,
+          case "warning":
+            setWarnings((prev) =>
+              prev.includes(event.message)
+                ? prev
+                : [...prev, event.message],
+            );
+            break;
+
+          case "complete":
+            setMeta({
+              summary: event.summary,
+              profession: event.profession,
+              truncated: event.truncated,
+              searchCallsMade: event.searchCallsMade,
+              scrapeStats: event.scrapeStats,
+            });
+            setWarnings(event.warnings);
+            setSearchPhase(null);
+            setSearchProgress(null);
+            break;
+
+          case "error":
+            setError(event.error);
+            if (event.issues) setIssues(event.issues);
+            setRows([]);
+            setMeta(null);
+            setSearchPhase(null);
+            setSearchProgress(null);
+            break;
+
+          default:
+            break;
+        }
       });
-      setWarnings(data.warnings);
     } catch {
       setError("Network error — try again.");
       setRows([]);
       setMeta(null);
       setWarnings([]);
+      setSearchPhase(null);
+      setSearchProgress(null);
     } finally {
       setBusy(false);
     }
@@ -450,6 +551,47 @@ export function LeadFinderForm() {
         </div>
       ) : null}
 
+      {busy && searchPhase ? (
+        <div
+          className="rounded-xl border border-indigo-200/80 bg-indigo-50/90 px-5 py-4 shadow-sm dark:border-indigo-900/60 dark:bg-indigo-950/40"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="relative flex h-3 w-3">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
+              <span className="relative inline-flex h-3 w-3 rounded-full bg-indigo-600 dark:bg-indigo-400" />
+            </span>
+            <p className="text-sm font-medium text-indigo-950 dark:text-indigo-100">
+              {searchPhase}
+            </p>
+            {searchProgress && searchProgress.total > 0 ? (
+              <span className="tabular-nums text-xs text-indigo-800/80 dark:text-indigo-200/80">
+                {searchProgress.checked}/{searchProgress.total}
+                {searchProgress.phase === "scraping"
+                  ? ` · ${reviewStats.total} email${reviewStats.total === 1 ? "" : "s"} found`
+                  : ""}
+              </span>
+            ) : null}
+          </div>
+          {searchProgress?.currentName ? (
+            <p className="mt-2 truncate text-xs text-indigo-900/70 dark:text-indigo-200/70">
+              {searchProgress.currentName}
+            </p>
+          ) : null}
+          {searchProgress && searchProgress.total > 0 ? (
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-indigo-200/70 dark:bg-indigo-900/50">
+              <div
+                className="h-full rounded-full bg-indigo-600 transition-[width] duration-300 ease-out dark:bg-indigo-400"
+                style={{
+                  width: `${Math.min(100, Math.round((searchProgress.checked / searchProgress.total) * 100))}%`,
+                }}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {meta ? (
         <div className="space-y-2 rounded-xl border border-neutral-200 bg-white/80 px-5 py-4 text-sm text-neutral-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-neutral-200">
           <p className="text-[13px] text-neutral-500 dark:text-neutral-400">
@@ -467,7 +609,7 @@ export function LeadFinderForm() {
         </div>
       ) : null}
 
-      {sortedRows.length ? (
+      {showResultsPanel ? (
         <section className="overflow-hidden rounded-2xl border border-neutral-200/80 bg-neutral-900/[0.01] shadow-[0_1px_6px_rgb(15_23_42/0.08)] dark:border-neutral-800 dark:bg-neutral-950">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-neutral-200 bg-neutral-50 px-6 py-4 dark:border-neutral-800 dark:bg-neutral-950/80">
             <div className="space-y-3">
@@ -476,8 +618,17 @@ export function LeadFinderForm() {
                   Review runway
                 </p>
                 <span className="tabular-nums text-xs text-neutral-500">
-                  Pending {reviewStats.pending} · Shortlist {reviewStats.approved}{" "}
-                  · Removed {reviewStats.removed}
+                  {busy ? (
+                    <>
+                      {reviewStats.total} found so far · Pending{" "}
+                      {reviewStats.pending}
+                    </>
+                  ) : (
+                    <>
+                      Pending {reviewStats.pending} · Shortlist{" "}
+                      {reviewStats.approved} · Removed {reviewStats.removed}
+                    </>
+                  )}
                 </span>
               </div>
               <p className="max-w-2xl text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
@@ -555,10 +706,10 @@ export function LeadFinderForm() {
                 </tr>
               </thead>
               <tbody>
-                {sortedRows.map((row) => (
+                {displayRows.map((row) => (
                   <tr
                     key={row.placeResourceName}
-                    className={`border-b border-neutral-100 hover:bg-neutral-50/70 dark:border-neutral-900 dark:hover:bg-neutral-900/50 ${rowSkin(row.review)}`}
+                    className={`lead-row-enter border-b border-neutral-100 hover:bg-neutral-50/70 dark:border-neutral-900 dark:hover:bg-neutral-900/50 ${rowSkin(row.review)}`}
                   >
                     <td className="px-4 py-3 align-middle text-[11px] font-semibold uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-300">
                       {row.review === "pending" ? (
@@ -687,13 +838,32 @@ export function LeadFinderForm() {
                     </td>
                   </tr>
                 ))}
+                {busy ? (
+                  <tr className="border-b border-indigo-100 bg-indigo-50/50 dark:border-indigo-900/40 dark:bg-indigo-950/30">
+                    <td
+                      colSpan={7}
+                      className="px-6 py-4 text-sm text-indigo-900 dark:text-indigo-100"
+                    >
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-700 dark:border-indigo-600 dark:border-t-indigo-200" />
+                        <span>
+                          {searchProgress?.phase === "places"
+                            ? "Still querying Google Places…"
+                            : searchProgress?.currentName
+                              ? `Checking ${searchProgress.currentName}…`
+                              : "Still scanning websites for emails…"}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
         </section>
       ) : null}
 
-      {!busy && meta && sortedRows.length === 0 ? (
+      {!busy && meta && displayRows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-neutral-300 px-5 py-4 text-center text-sm text-neutral-600 dark:border-neutral-700 dark:text-neutral-300">
           No companies with a scrapeable public email matched this search. Try a
           broader profession, different corridor, or check the heads-up notes for

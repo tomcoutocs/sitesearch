@@ -11,22 +11,35 @@ export type EmailScrapeStats = {
   droppedNoEmail: number;
 };
 
+export type ScrapeProgress = {
+  checked: number;
+  total: number;
+  found: number;
+  currentName: string;
+};
+
 async function pause(ms: number) {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
 }
 
-/** Keeps only rows where public HTML scraping surfaced a plausible inbox. */
-export async function retainCompaniesWithScrapedEmail(
+export type ScrapeHooks = {
+  delayMs?: number;
+  onProgress?: (progress: ScrapeProgress) => void;
+  onFound?: (company: CompanyRow) => void;
+  onWarning?: (message: string) => void;
+};
+
+/** Scrape storefronts; invokes hooks as each site is checked and when email is found. */
+export async function scrapeCandidatesForEmails(
   candidates: CompanyRow[],
-  options?: { delayMs?: number },
+  hooks?: ScrapeHooks,
 ): Promise<{
-  companies: CompanyRow[];
   stats: EmailScrapeStats;
   warnings: string[];
 }> {
-  const delayMs = options?.delayMs ?? DEFAULT_DELAY_MS;
+  const delayMs = hooks?.delayMs ?? DEFAULT_DELAY_MS;
   const warnings: string[] = [];
 
   const stats: EmailScrapeStats = {
@@ -37,7 +50,6 @@ export async function retainCompaniesWithScrapedEmail(
     droppedNoEmail: 0,
   };
 
-  const withInbox: CompanyRow[] = [];
   const scrapeQueue = candidates.filter((row) => {
     if (!row.websiteUrl?.trim()) {
       stats.skippedNoWebsite += 1;
@@ -46,10 +58,19 @@ export async function retainCompaniesWithScrapedEmail(
     return true;
   });
 
-  let index = 0;
+  const total = scrapeQueue.length;
+  let checked = 0;
+
   for (const row of scrapeQueue) {
-    index += 1;
+    checked += 1;
     stats.scrapedAttempts += 1;
+
+    hooks?.onProgress?.({
+      checked,
+      total,
+      found: stats.withEmail,
+      currentName: row.name,
+    });
 
     try {
       const scraped = await findEmailViaHttpFetch(row.websiteUrl);
@@ -60,29 +81,52 @@ export async function retainCompaniesWithScrapedEmail(
             ? `Found on ${scraped.matchedPath ?? "/"} (${scraped.confidence}% heuristic)`
             : `Found on ${scraped.matchedPath ?? "/"}`;
 
-        withInbox.push({
+        const enriched: CompanyRow = {
           ...row,
           email: scraped.email,
           emailSource: sourceNote,
-        });
+        };
+
         stats.withEmail += 1;
+        hooks?.onFound?.(enriched);
       } else {
         stats.droppedNoEmail += 1;
       }
     } catch (e) {
       stats.droppedNoEmail += 1;
       const msg = e instanceof Error ? e.message : "Scrape failed";
-      warnings.push(`${row.name}: ${msg}`);
+      const warning = `${row.name}: ${msg}`;
+      warnings.push(warning);
+      hooks?.onWarning?.(warning);
     }
 
-    if (index < scrapeQueue.length) {
+    if (checked < total) {
       await pause(delayMs);
     }
   }
 
-  withInbox.sort((a, b) =>
+  return { stats, warnings };
+}
+
+/** Batch helper (non-streaming callers). */
+export async function retainCompaniesWithScrapedEmail(
+  candidates: CompanyRow[],
+  options?: { delayMs?: number },
+): Promise<{
+  companies: CompanyRow[];
+  stats: EmailScrapeStats;
+  warnings: string[];
+}> {
+  const collected: CompanyRow[] = [];
+
+  const { stats, warnings } = await scrapeCandidatesForEmails(candidates, {
+    delayMs: options?.delayMs,
+    onFound: (company) => collected.push(company),
+  });
+
+  collected.sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
   );
 
-  return { companies: withInbox, stats, warnings };
+  return { companies: collected, stats, warnings };
 }
