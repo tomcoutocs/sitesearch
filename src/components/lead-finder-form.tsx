@@ -133,6 +133,22 @@ const ACTION_BTN_PRIMARY =
 const ACTION_BTN_SECONDARY =
   "text-[11px] font-semibold text-neutral-500 underline-offset-4 hover:text-neutral-800 hover:underline dark:text-neutral-400 dark:hover:text-neutral-200";
 
+function activeSearchLabel(
+  progress: SearchProgress | null,
+  fallbackPhase: string | null,
+) {
+  if (progress?.phase === "places") {
+    return "Still querying Google Places…";
+  }
+  if (progress?.currentName) {
+    return `Checking ${progress.currentName}…`;
+  }
+  if (fallbackPhase) {
+    return fallbackPhase;
+  }
+  return "Still scanning websites for emails…";
+}
+
 export function LeadFinderForm() {
   const [profession, setProfession] = useState("");
   const [corridor, setCorridor] = useState("");
@@ -158,7 +174,6 @@ export function LeadFinderForm() {
   const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(
     null,
   );
-
   const reviewStats = useMemo(() => {
     let pending = 0;
     let approved = 0;
@@ -678,7 +693,8 @@ export function LeadFinderForm() {
             </div>
           </div>
 
-          <div className="max-h-[32rem] overflow-auto">
+          <div className="flex max-h-[32rem] flex-col">
+            <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full min-w-[940px] table-fixed border-collapse text-left text-[13px]">
               <thead className="sticky top-0 z-10 bg-white/95 text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400 backdrop-blur dark:bg-neutral-950/95">
                 <tr>
@@ -838,27 +854,29 @@ export function LeadFinderForm() {
                     </td>
                   </tr>
                 ))}
-                {busy ? (
-                  <tr className="border-b border-indigo-100 bg-indigo-50/50 dark:border-indigo-900/40 dark:bg-indigo-950/30">
-                    <td
-                      colSpan={7}
-                      className="px-6 py-4 text-sm text-indigo-900 dark:text-indigo-100"
-                    >
-                      <div className="flex flex-wrap items-center gap-3">
-                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-700 dark:border-indigo-600 dark:border-t-indigo-200" />
-                        <span>
-                          {searchProgress?.phase === "places"
-                            ? "Still querying Google Places…"
-                            : searchProgress?.currentName
-                              ? `Checking ${searchProgress.currentName}…`
-                              : "Still scanning websites for emails…"}
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : null}
               </tbody>
             </table>
+            </div>
+
+            {busy ? (
+              <div
+                className="shrink-0 border-t border-indigo-200/80 bg-indigo-50/95 px-6 py-3 shadow-[0_-8px_24px_rgb(99_102_241/0.12)] backdrop-blur-sm dark:border-indigo-900/60 dark:bg-indigo-950/90"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex flex-wrap items-center gap-3 text-sm text-indigo-950 dark:text-indigo-100">
+                  <span className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-700 dark:border-indigo-600 dark:border-t-indigo-200" />
+                  <span className="min-w-0 flex-1 truncate font-medium">
+                    {activeSearchLabel(searchProgress, searchPhase)}
+                  </span>
+                  {searchProgress && searchProgress.total > 0 ? (
+                    <span className="shrink-0 tabular-nums text-xs text-indigo-800/80 dark:text-indigo-200/80">
+                      {searchProgress.checked}/{searchProgress.total}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}
