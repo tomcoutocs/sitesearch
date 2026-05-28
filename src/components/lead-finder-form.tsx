@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { CompanyRow } from "@/lib/company";
 import {
@@ -9,6 +9,15 @@ import {
   outreachChannelValues,
   type OutreachChannel,
 } from "@/lib/compose-search-briefing";
+import {
+  applyEmailTemplate,
+  DEFAULT_EMAIL_BODY,
+  DEFAULT_EMAIL_SUBJECT,
+  EMAIL_TEMPLATE_PLACEHOLDERS,
+  EMAIL_TEMPLATE_STORAGE_KEY,
+  type OutreachTemplate,
+} from "@/lib/email-template";
+import { gmailComposeUrl, openGmailCompose } from "@/lib/gmail-compose";
 import type { LeadsStreamEvent } from "@/lib/leads-stream";
 
 type EmailScrapeStats = {
@@ -174,6 +183,44 @@ export function LeadFinderForm() {
   const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(
     null,
   );
+  const [emailSubject, setEmailSubject] = useState(DEFAULT_EMAIL_SUBJECT);
+  const [emailBody, setEmailBody] = useState(DEFAULT_EMAIL_BODY);
+  const [templateReady, setTemplateReady] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(EMAIL_TEMPLATE_STORAGE_KEY);
+      if (!raw) {
+        setTemplateReady(true);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<OutreachTemplate>;
+      if (typeof parsed.subject === "string") {
+        setEmailSubject(parsed.subject);
+      }
+      if (typeof parsed.body === "string") {
+        setEmailBody(parsed.body);
+      }
+    } catch {
+      // ignore corrupt saved template
+    } finally {
+      setTemplateReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!templateReady) return;
+    const payload: OutreachTemplate = {
+      subject: emailSubject,
+      body: emailBody,
+    };
+    try {
+      localStorage.setItem(EMAIL_TEMPLATE_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore quota errors
+    }
+  }, [emailSubject, emailBody, templateReady]);
+
   const reviewStats = useMemo(() => {
     let pending = 0;
     let approved = 0;
@@ -195,6 +242,14 @@ export function LeadFinderForm() {
   );
 
   const showResultsPanel = busy || rows.length > 0;
+
+  const shortlistedRows = useMemo(
+    () =>
+      rows.filter(
+        (row) => row.review === "approved" && Boolean(row.email?.trim()),
+      ),
+    [rows],
+  );
 
   const csvPayload = useMemo(() => {
     const shortlist = rows
@@ -352,6 +407,34 @@ export function LeadFinderForm() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function templateContextFor(row: WorkspaceRow) {
+    return {
+      company: row,
+      profession: meta?.profession ?? profession,
+    };
+  }
+
+  function gmailHrefFor(row: WorkspaceRow) {
+    const email = row.email?.trim();
+    if (!email) return null;
+
+    const rendered = applyEmailTemplate(emailBody, templateContextFor(row));
+    const subject = applyEmailTemplate(emailSubject, templateContextFor(row));
+
+    return gmailComposeUrl({ to: email, subject, body: rendered });
+  }
+
+  function openGmailForRow(row: WorkspaceRow) {
+    const email = row.email?.trim();
+    if (!email) return;
+
+    openGmailCompose({
+      to: email,
+      subject: applyEmailTemplate(emailSubject, templateContextFor(row)),
+      body: applyEmailTemplate(emailBody, templateContextFor(row)),
+    });
   }
 
   function downloadCsv() {
@@ -624,6 +707,59 @@ export function LeadFinderForm() {
         </div>
       ) : null}
 
+      {shortlistedRows.length > 0 ? (
+        <section className="flex flex-col gap-4 rounded-2xl border border-neutral-200/80 bg-white/90 p-6 shadow-[0_1px_2px_rgb(15_23_42/0.04)] dark:border-neutral-800 dark:bg-neutral-950/80">
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">
+              Gmail outreach template
+            </h3>
+            <p className="max-w-2xl text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+              Edit once below—each&nbsp;
+              <span className="font-medium text-neutral-800 dark:text-neutral-200">
+                Open in Gmail
+              </span>
+              &nbsp;button launches a new compose window in your browser with the
+              recipient, subject, and body prefilled. You review and send from your
+              own Gmail account.
+            </p>
+            <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+              Placeholders: {EMAIL_TEMPLATE_PLACEHOLDERS.join(", ")}
+            </p>
+          </div>
+
+          <label className="flex flex-col gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">
+              Subject line
+            </span>
+            <input
+              type="text"
+              value={emailSubject}
+              disabled={busy}
+              onChange={(e) => setEmailSubject(e.target.value)}
+              className={CONTROL}
+            />
+          </label>
+
+          <label className="flex flex-col gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">
+              Email body
+            </span>
+            <textarea
+              value={emailBody}
+              disabled={busy}
+              onChange={(e) => setEmailBody(e.target.value)}
+              rows={10}
+              className={`${CONTROL} resize-y font-mono text-[13px]`}
+            />
+          </label>
+
+          <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+            Template auto-saves in this browser. Replace the bracketed sign-off with
+            your details before sending.
+          </p>
+        </section>
+      ) : null}
+
       {showResultsPanel ? (
         <section className="overflow-hidden rounded-2xl border border-neutral-200/80 bg-neutral-900/[0.01] shadow-[0_1px_6px_rgb(15_23_42/0.08)] dark:border-neutral-800 dark:bg-neutral-950">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-neutral-200 bg-neutral-50 px-6 py-4 dark:border-neutral-800 dark:bg-neutral-950/80">
@@ -656,7 +792,12 @@ export function LeadFinderForm() {
                 <span className="font-semibold text-neutral-800 dark:text-neutral-200">
                   Remove
                 </span>
-                . Export unlocks once every row is dispositioned.
+                . Export unlocks once every row is dispositioned. Shortlisted rows
+                get an&nbsp;
+                <span className="font-semibold text-neutral-800 dark:text-neutral-200">
+                  Open in Gmail
+                </span>
+                &nbsp;action.
               </p>
               {reviewStats.pending > 0 ? (
                 <p className="text-[11px] font-semibold text-rose-700 dark:text-rose-400">
@@ -701,7 +842,7 @@ export function LeadFinderForm() {
                   <th className="w-[100px] border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
                     Status
                   </th>
-                  <th className="w-[150px] border-b border-neutral-200 px-3 py-3 dark:border-neutral-800">
+                  <th className="w-[190px] border-b border-neutral-200 px-3 py-3 dark:border-neutral-800">
                     Actions
                   </th>
                   <th className="w-[170px] border-b border-neutral-200 px-3 py-3 dark:border-neutral-800">
@@ -768,10 +909,32 @@ export function LeadFinderForm() {
                             </button>
                           </div>
                         ) : row.review === "approved" ? (
-                          <div className="flex flex-col gap-1">
+                          <div className="flex flex-col gap-2">
                             <span className="text-[11px] font-semibold text-emerald-900 dark:text-emerald-400">
                               Shortlisted
                             </span>
+                            {row.email ? (
+                              <a
+                                href={gmailHrefFor(row) ?? "#"}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => {
+                                  if (busy || !row.email) {
+                                    e.preventDefault();
+                                    return;
+                                  }
+                                  e.preventDefault();
+                                  openGmailForRow(row);
+                                }}
+                                className={`inline-flex w-fit items-center justify-center border border-indigo-300 bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-indigo-950 transition hover:bg-indigo-100 dark:border-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-50 dark:hover:bg-indigo-900/60 ${ACTION_BTN_PRIMARY}`}
+                              >
+                                Open in Gmail
+                              </a>
+                            ) : (
+                              <span className="text-[10px] text-neutral-400">
+                                No email on file
+                              </span>
+                            )}
                             <button
                               type="button"
                               disabled={busy}
