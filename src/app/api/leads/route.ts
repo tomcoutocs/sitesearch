@@ -79,6 +79,19 @@ function resolveSearchBriefing(payload: unknown): string | null {
   });
 }
 
+function resolveEmailOnly(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") {
+    return true;
+  }
+
+  const emailOnly = (payload as Record<string, unknown>).emailOnly;
+  if (typeof emailOnly === "boolean") {
+    return emailOnly;
+  }
+
+  return true;
+}
+
 function jsonError(
   message: string,
   status: number,
@@ -111,6 +124,7 @@ export async function POST(req: Request) {
   }
 
   const prompt = resolveSearchBriefing(payload)?.trim();
+  const emailOnly = resolveEmailOnly(payload);
 
   if (!prompt) {
     return jsonError(
@@ -134,6 +148,7 @@ export async function POST(req: Request) {
             googleApiKey: googleKey,
             model,
             prompt,
+            emailOnly,
           },
           push,
         );

@@ -19,6 +19,8 @@ export type LeadsPipelineContext = {
   googleApiKey: string;
   model: string;
   prompt: string;
+  /** When true (default), only emit companies with a scraped public email. */
+  emailOnly?: boolean;
 };
 
 export type LeadsPipelineResult = {
@@ -35,6 +37,7 @@ export async function runLeadsPipeline(
   ctx: LeadsPipelineContext,
   emit: (event: LeadsStreamEvent) => void,
 ): Promise<LeadsPipelineResult> {
+  const emailOnly = ctx.emailOnly ?? true;
   const warnings: string[] = [];
   const companies: CompanyRow[] = [];
 
@@ -179,12 +182,17 @@ export async function runLeadsPipeline(
     phase: "scraping",
     message:
       scrapeTotal > 0
-        ? `Checking ${scrapeTotal} website${scrapeTotal === 1 ? "" : "s"} for public emails…`
-        : "No websites to check — wrapping up.",
+        ? emailOnly
+          ? `Checking ${scrapeTotal} website${scrapeTotal === 1 ? "" : "s"} for public emails…`
+          : `Checking ${scrapeTotal} website${scrapeTotal === 1 ? "" : "s"} and listing all companies…`
+        : emailOnly
+          ? "No websites to check — wrapping up."
+          : "Listing companies without website scrapes…",
   });
 
   const { stats: scrapeStats, warnings: scrapeWarnings } =
     await scrapeCandidatesForEmails(candidates, {
+      requireEmail: emailOnly,
       onProgress: (progress) => {
         emit({
           type: "progress",
@@ -207,14 +215,18 @@ export async function runLeadsPipeline(
 
   warnings.push(...scrapeWarnings);
 
-  if (preScrapeCount > 0 && companies.length === 0) {
+  if (emailOnly && preScrapeCount > 0 && companies.length === 0) {
     const emptyMsg = `Checked ${scrapeStats.scrapedAttempts} storefront${scrapeStats.scrapedAttempts === 1 ? "" : "s"} (${scrapeStats.skippedNoWebsite} lacked a website). None exposed a scrapeable email on public pages.`;
     warnings.push(emptyMsg);
     emit({ type: "warning", message: emptyMsg });
-  } else if (scrapeStats.droppedNoEmail > 0) {
+  } else if (emailOnly && scrapeStats.droppedNoEmail > 0) {
     const dropMsg = `Filtered out ${scrapeStats.droppedNoEmail} listing${scrapeStats.droppedNoEmail === 1 ? "" : "s"} with no plaintext email on their site.`;
     warnings.push(dropMsg);
     emit({ type: "warning", message: dropMsg });
+  } else if (!emailOnly && scrapeStats.includedNoEmail > 0) {
+    const infoMsg = `${scrapeStats.includedNoEmail} listing${scrapeStats.includedNoEmail === 1 ? "" : "s"} included without a public email on their site.`;
+    warnings.push(infoMsg);
+    emit({ type: "warning", message: infoMsg });
   }
 
   const totalJobs = geographies.length * queryTexts.length;

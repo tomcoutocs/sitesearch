@@ -33,6 +33,7 @@ type EmailScrapeStats = {
   scrapedAttempts: number;
   withEmail: number;
   droppedNoEmail: number;
+  includedNoEmail: number;
 };
 
 type SearchProgress = {
@@ -173,6 +174,8 @@ export function LeadFinderForm() {
   const [outreachChannel, setOutreachChannel] =
     useState<OutreachChannel>("email");
   const [additionalNotes, setAdditionalNotes] = useState("");
+  const [emailOnly, setEmailOnly] = useState(true);
+  const [lastSearchEmailOnly, setLastSearchEmailOnly] = useState(true);
 
   const [rows, setRows] = useState<WorkspaceRow[]>([]);
   const [meta, setMeta] = useState<{
@@ -327,6 +330,7 @@ export function LeadFinderForm() {
     setWarnings([]);
     setSearchPhase("Starting search…");
     setSearchProgress(null);
+    setLastSearchEmailOnly(emailOnly);
 
     const payload = {
       profession,
@@ -334,6 +338,7 @@ export function LeadFinderForm() {
       radiusMiles,
       exclusions,
       outreachChannel,
+      emailOnly,
       additionalNotes:
         additionalNotes.trim().length === 0 ? undefined : additionalNotes.trim(),
     };
@@ -550,8 +555,15 @@ export function LeadFinderForm() {
             </h2>
             <p className="max-w-xl text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
               Places finds candidates, then we scrape each website for a public
-              inbox before anything hits your review table—only rows with a found
-              email appear.
+              inbox. Choose whether your review table shows{" "}
+              <span className="font-medium text-neutral-800 dark:text-neutral-200">
+                only companies with a found email
+              </span>{" "}
+              or{" "}
+              <span className="font-medium text-neutral-800 dark:text-neutral-200">
+                every storefront
+              </span>{" "}
+              either way.
             </p>
           </div>
           <button
@@ -691,6 +703,49 @@ export function LeadFinderForm() {
                 className={`${CONTROL} resize-none`}
               />
             </label>
+
+            <div className="flex flex-col gap-3 sm:col-span-2">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">
+                Results filter
+              </span>
+              <div
+                className="inline-flex w-fit rounded-full border border-neutral-200 bg-white p-1 dark:border-neutral-700 dark:bg-neutral-900"
+                role="group"
+                aria-label="Results filter"
+              >
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setEmailOnly(true)}
+                  aria-pressed={emailOnly}
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                    emailOnly
+                      ? "bg-neutral-950 text-neutral-50 dark:bg-neutral-50 dark:text-neutral-950"
+                      : "text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+                  }`}
+                >
+                  With email only
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setEmailOnly(false)}
+                  aria-pressed={!emailOnly}
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                    !emailOnly
+                      ? "bg-neutral-950 text-neutral-50 dark:bg-neutral-50 dark:text-neutral-950"
+                      : "text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+                  }`}
+                >
+                  All companies
+                </button>
+              </div>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                {emailOnly
+                  ? "Only rows with a scrapeable public email reach your review table."
+                  : "Every Places hit is listed. We still scrape for emails where a website exists—rows without one show a blank email field."}
+              </p>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -699,7 +754,13 @@ export function LeadFinderForm() {
               disabled={disableSubmit}
               className="inline-flex h-11 cursor-pointer items-center justify-center rounded-full bg-neutral-950 px-6 text-sm font-medium text-neutral-50 transition hover:bg-neutral-800 disabled:pointer-events-none disabled:opacity-40 dark:bg-neutral-50 dark:text-neutral-950 dark:hover:bg-neutral-200"
             >
-              {busy ? "Searching & scraping emails…" : "Find companies with emails"}
+              {busy
+                ? emailOnly
+                  ? "Searching & scraping emails…"
+                  : "Searching companies…"
+                : emailOnly
+                  ? "Find companies with emails"
+                  : "Find all companies"}
             </button>
           </div>
         </form>
@@ -746,7 +807,7 @@ export function LeadFinderForm() {
               <span className="tabular-nums text-xs text-indigo-800/80 dark:text-indigo-200/80">
                 {searchProgress.checked}/{searchProgress.total}
                 {searchProgress.phase === "scraping"
-                  ? ` · ${reviewStats.total} email${reviewStats.total === 1 ? "" : "s"} found`
+                  ? ` · ${searchProgress.found} ${emailOnly ? `email${searchProgress.found === 1 ? "" : "s"}` : `compan${searchProgress.found === 1 ? "y" : "ies"}`} found`
                   : ""}
               </span>
             ) : null}
@@ -775,9 +836,13 @@ export function LeadFinderForm() {
             {meta.profession} · {meta.summary}
           </p>
           <p className="text-xs text-neutral-500 dark:text-neutral-400">
-            {reviewStats.total} with scrapeable emails in your table
+            {lastSearchEmailOnly
+              ? `${reviewStats.total} with scrapeable emails in your table`
+              : `${reviewStats.total} companies in your table${meta.scrapeStats ? ` (${meta.scrapeStats.withEmail} with email)` : ""}`}
             {meta.scrapeStats
-              ? ` · ${meta.scrapeStats.withEmail} kept from ${meta.scrapeStats.placesCandidates} Places hits (${meta.scrapeStats.droppedNoEmail} sites had no public inbox, ${meta.scrapeStats.skippedNoWebsite} lacked a website)`
+              ? lastSearchEmailOnly
+                ? ` · ${meta.scrapeStats.withEmail} kept from ${meta.scrapeStats.placesCandidates} Places hits (${meta.scrapeStats.droppedNoEmail} sites had no public inbox, ${meta.scrapeStats.skippedNoWebsite} lacked a website)`
+                : ` · ${meta.scrapeStats.placesCandidates} Places hits (${meta.scrapeStats.includedNoEmail} without a public inbox, ${meta.scrapeStats.skippedNoWebsite} lacked a website)`
               : ""}
             {" · "}
             {meta.searchCallsMade} Google Text Search lookups
@@ -868,8 +933,9 @@ export function LeadFinderForm() {
                 </span>
               </div>
               <p className="max-w-2xl text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
-                Every row already has a scraped email. Open the site, decide if it
-                needs a refresh, then&nbsp;
+                {lastSearchEmailOnly
+                  ? "Every row has a scraped email. Open the site, decide if it needs a refresh, then"
+                  : "Review each storefront. Rows with an email can be emailed via Gmail once shortlisted."}{" "}
                 <span className="font-semibold text-neutral-800 dark:text-neutral-200">
                   Shortlist
                 </span>{" "}
@@ -877,12 +943,17 @@ export function LeadFinderForm() {
                 <span className="font-semibold text-neutral-800 dark:text-neutral-200">
                   Remove
                 </span>
-                . Export unlocks once every row is dispositioned. Shortlisted rows
-                get an&nbsp;
-                <span className="font-semibold text-neutral-800 dark:text-neutral-200">
-                  Open in Gmail
-                </span>
-                &nbsp;action.
+                . Export unlocks once every row is dispositioned.
+                {lastSearchEmailOnly ? (
+                  <>
+                    {" "}
+                    Shortlisted rows get an&nbsp;
+                    <span className="font-semibold text-neutral-800 dark:text-neutral-200">
+                      Open in Gmail
+                    </span>
+                    &nbsp;action.
+                  </>
+                ) : null}
               </p>
               {reviewStats.pending > 0 ? (
                 <p className="text-[11px] font-semibold text-rose-700 dark:text-rose-400">
@@ -1158,9 +1229,9 @@ export function LeadFinderForm() {
 
       {!busy && meta && displayRows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-neutral-300 px-5 py-4 text-center text-sm text-neutral-600 dark:border-neutral-700 dark:text-neutral-300">
-          No companies with a scrapeable public email matched this search. Try a
-          broader profession, different corridor, or check the heads-up notes for
-          how many sites were skipped.
+          {lastSearchEmailOnly
+            ? "No companies with a scrapeable public email matched this search. Try a broader profession, different corridor, or switch to All companies."
+            : "No companies matched this search. Try a broader profession or different corridor."}
         </p>
       ) : null}
     </div>

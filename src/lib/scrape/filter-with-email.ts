@@ -9,6 +9,8 @@ export type EmailScrapeStats = {
   scrapedAttempts: number;
   withEmail: number;
   droppedNoEmail: number;
+  /** Included in results without a scraped email (requireEmail=false). */
+  includedNoEmail: number;
 };
 
 export type ScrapeProgress = {
@@ -26,6 +28,8 @@ async function pause(ms: number) {
 
 export type ScrapeHooks = {
   delayMs?: number;
+  /** When true (default), only companies with a scraped email are emitted. */
+  requireEmail?: boolean;
   onProgress?: (progress: ScrapeProgress) => void;
   onFound?: (company: CompanyRow) => void;
   onWarning?: (message: string) => void;
@@ -40,6 +44,7 @@ export async function scrapeCandidatesForEmails(
   warnings: string[];
 }> {
   const delayMs = hooks?.delayMs ?? DEFAULT_DELAY_MS;
+  const requireEmail = hooks?.requireEmail ?? true;
   const warnings: string[] = [];
 
   const stats: EmailScrapeStats = {
@@ -48,11 +53,31 @@ export async function scrapeCandidatesForEmails(
     scrapedAttempts: 0,
     withEmail: 0,
     droppedNoEmail: 0,
+    includedNoEmail: 0,
   };
+
+  let emitted = 0;
+
+  const emitCompany = (company: CompanyRow) => {
+    emitted += 1;
+    hooks?.onFound?.(company);
+  };
+
+  if (!requireEmail) {
+    for (const row of candidates) {
+      if (!row.websiteUrl?.trim()) {
+        stats.skippedNoWebsite += 1;
+        stats.includedNoEmail += 1;
+        emitCompany(row);
+      }
+    }
+  }
 
   const scrapeQueue = candidates.filter((row) => {
     if (!row.websiteUrl?.trim()) {
-      stats.skippedNoWebsite += 1;
+      if (requireEmail) {
+        stats.skippedNoWebsite += 1;
+      }
       return false;
     }
     return true;
@@ -68,7 +93,7 @@ export async function scrapeCandidatesForEmails(
     hooks?.onProgress?.({
       checked,
       total,
-      found: stats.withEmail,
+      found: emitted,
       currentName: row.name,
     });
 
@@ -88,12 +113,20 @@ export async function scrapeCandidatesForEmails(
         };
 
         stats.withEmail += 1;
-        hooks?.onFound?.(enriched);
-      } else {
+        emitCompany(enriched);
+      } else if (requireEmail) {
         stats.droppedNoEmail += 1;
+      } else {
+        stats.includedNoEmail += 1;
+        emitCompany(row);
       }
     } catch (e) {
-      stats.droppedNoEmail += 1;
+      if (requireEmail) {
+        stats.droppedNoEmail += 1;
+      } else {
+        stats.includedNoEmail += 1;
+        emitCompany(row);
+      }
       const msg = e instanceof Error ? e.message : "Scrape failed";
       const warning = `${row.name}: ${msg}`;
       warnings.push(warning);
