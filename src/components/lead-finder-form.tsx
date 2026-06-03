@@ -23,10 +23,9 @@ import {
   formatOutreachDate,
   normalizeOutreachEmail,
   type OutreachContact,
-  type OutreachStatus,
 } from "@/lib/outreach-contacts";
 
-import { OutreachHistory } from "@/components/outreach-history";
+import { useOutreach } from "@/components/outreach-provider";
 
 type EmailScrapeStats = {
   placesCandidates: number;
@@ -194,14 +193,14 @@ export function LeadFinderForm() {
   const [emailSubject, setEmailSubject] = useState(DEFAULT_EMAIL_SUBJECT);
   const [emailBody, setEmailBody] = useState(DEFAULT_EMAIL_BODY);
   const [templateReady, setTemplateReady] = useState(false);
-  const [outreachContacts, setOutreachContacts] = useState<OutreachContact[]>(
-    [],
-  );
-  const [outreachConfigured, setOutreachConfigured] = useState(false);
-  const [outreachLoading, setOutreachLoading] = useState(true);
-  const [outreachError, setOutreachError] = useState<string | null>(null);
   const [outreachNotice, setOutreachNotice] = useState<string | null>(null);
   const [recordingEmail, setRecordingEmail] = useState<string | null>(null);
+  const {
+    configured: outreachConfigured,
+    contactedByEmail,
+    refresh: refreshOutreachContacts,
+    addContact,
+  } = useOutreach();
 
   useEffect(() => {
     try {
@@ -236,75 +235,6 @@ export function LeadFinderForm() {
       // ignore quota errors
     }
   }, [emailSubject, emailBody, templateReady]);
-
-  async function refreshOutreachContacts() {
-    setOutreachLoading(true);
-    setOutreachError(null);
-
-    try {
-      const res = await fetch("/api/outreach");
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(data?.error ?? "Could not load outreach history");
-      }
-
-      const data = (await res.json()) as {
-        configured: boolean;
-        contacts: OutreachContact[];
-      };
-
-      setOutreachConfigured(data.configured);
-      setOutreachContacts(data.contacts ?? []);
-    } catch (e) {
-      setOutreachError(
-        e instanceof Error ? e.message : "Could not load outreach history",
-      );
-    } finally {
-      setOutreachLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void refreshOutreachContacts();
-  }, []);
-
-  const contactedByEmail = useMemo(() => {
-    const map = new Map<string, OutreachContact>();
-    for (const contact of outreachContacts) {
-      map.set(contact.email_normalized, contact);
-    }
-    return map;
-  }, [outreachContacts]);
-
-  async function updateOutreachContact(
-    id: string,
-    patch: { status?: OutreachStatus; notes?: string | null },
-  ) {
-    const res = await fetch(`/api/outreach/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
-    });
-
-    if (!res.ok) {
-      const data = (await res.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      setOutreachError(data?.error ?? "Could not update contact");
-      return false;
-    }
-
-    const data = (await res.json()) as { contact: OutreachContact };
-    setOutreachContacts((prev) =>
-      prev.map((contact) =>
-        contact.id === id ? data.contact : contact,
-      ),
-    );
-    setOutreachError(null);
-    return true;
-  }
 
   const reviewStats = useMemo(() => {
     let pending = 0;
@@ -526,7 +456,7 @@ export function LeadFinderForm() {
 
     if (existing) {
       setOutreachNotice(
-        `Already emailed ${existing.email} on ${formatOutreachDate(existing.emailed_at)}. Check Outreach history below.`,
+        `Already emailed ${existing.email} on ${formatOutreachDate(existing.emailed_at)}. See the Outreach tab.`,
       );
       return;
     }
@@ -571,7 +501,7 @@ export function LeadFinderForm() {
           );
         } else {
           const data = (await res.json()) as { contact: OutreachContact };
-          setOutreachContacts((prev) => [data.contact, ...prev]);
+          addContact(data.contact);
           setOutreachNotice(null);
         }
       } catch {
@@ -1233,15 +1163,6 @@ export function LeadFinderForm() {
           how many sites were skipped.
         </p>
       ) : null}
-
-      <OutreachHistory
-        contacts={outreachContacts}
-        configured={outreachConfigured}
-        loading={outreachLoading}
-        error={outreachError}
-        onRefresh={() => void refreshOutreachContacts()}
-        onUpdate={updateOutreachContact}
-      />
     </div>
   );
 }

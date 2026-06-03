@@ -1,4 +1,4 @@
-import { LeadFinderForm } from "@/components/lead-finder-form";
+import { AppShell } from "@/components/app-shell";
 
 export default function Home() {
   return (
@@ -19,7 +19,7 @@ export default function Home() {
           </p>
         </header>
 
-        <LeadFinderForm />
+        <AppShell />
 
         <footer className="space-y-1 text-xs text-neutral-400">
           <p>
