@@ -19,6 +19,14 @@ import {
 } from "@/lib/email-template";
 import { gmailComposeUrl, openGmailCompose } from "@/lib/gmail-compose";
 import type { LeadsStreamEvent } from "@/lib/leads-stream";
+import {
+  formatOutreachDate,
+  normalizeOutreachEmail,
+  type OutreachContact,
+  type OutreachStatus,
+} from "@/lib/outreach-contacts";
+
+import { OutreachHistory } from "@/components/outreach-history";
 
 type EmailScrapeStats = {
   placesCandidates: number;
@@ -186,6 +194,14 @@ export function LeadFinderForm() {
   const [emailSubject, setEmailSubject] = useState(DEFAULT_EMAIL_SUBJECT);
   const [emailBody, setEmailBody] = useState(DEFAULT_EMAIL_BODY);
   const [templateReady, setTemplateReady] = useState(false);
+  const [outreachContacts, setOutreachContacts] = useState<OutreachContact[]>(
+    [],
+  );
+  const [outreachConfigured, setOutreachConfigured] = useState(false);
+  const [outreachLoading, setOutreachLoading] = useState(true);
+  const [outreachError, setOutreachError] = useState<string | null>(null);
+  const [outreachNotice, setOutreachNotice] = useState<string | null>(null);
+  const [recordingEmail, setRecordingEmail] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -220,6 +236,75 @@ export function LeadFinderForm() {
       // ignore quota errors
     }
   }, [emailSubject, emailBody, templateReady]);
+
+  async function refreshOutreachContacts() {
+    setOutreachLoading(true);
+    setOutreachError(null);
+
+    try {
+      const res = await fetch("/api/outreach");
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(data?.error ?? "Could not load outreach history");
+      }
+
+      const data = (await res.json()) as {
+        configured: boolean;
+        contacts: OutreachContact[];
+      };
+
+      setOutreachConfigured(data.configured);
+      setOutreachContacts(data.contacts ?? []);
+    } catch (e) {
+      setOutreachError(
+        e instanceof Error ? e.message : "Could not load outreach history",
+      );
+    } finally {
+      setOutreachLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshOutreachContacts();
+  }, []);
+
+  const contactedByEmail = useMemo(() => {
+    const map = new Map<string, OutreachContact>();
+    for (const contact of outreachContacts) {
+      map.set(contact.email_normalized, contact);
+    }
+    return map;
+  }, [outreachContacts]);
+
+  async function updateOutreachContact(
+    id: string,
+    patch: { status?: OutreachStatus; notes?: string | null },
+  ) {
+    const res = await fetch(`/api/outreach/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      setOutreachError(data?.error ?? "Could not update contact");
+      return false;
+    }
+
+    const data = (await res.json()) as { contact: OutreachContact };
+    setOutreachContacts((prev) =>
+      prev.map((contact) =>
+        contact.id === id ? data.contact : contact,
+      ),
+    );
+    setOutreachError(null);
+    return true;
+  }
 
   const reviewStats = useMemo(() => {
     let pending = 0;
@@ -427,14 +512,78 @@ export function LeadFinderForm() {
   }
 
   function openGmailForRow(row: WorkspaceRow) {
+    void recordAndOpenGmail(row);
+  }
+
+  async function recordAndOpenGmail(row: WorkspaceRow) {
     const email = row.email?.trim();
     if (!email) return;
 
-    openGmailCompose({
-      to: email,
-      subject: applyEmailTemplate(emailSubject, templateContextFor(row)),
-      body: applyEmailTemplate(emailBody, templateContextFor(row)),
-    });
+    const subject = applyEmailTemplate(emailSubject, templateContextFor(row));
+    const body = applyEmailTemplate(emailBody, templateContextFor(row));
+    const normalized = normalizeOutreachEmail(email);
+    const existing = contactedByEmail.get(normalized);
+
+    if (existing) {
+      setOutreachNotice(
+        `Already emailed ${existing.email} on ${formatOutreachDate(existing.emailed_at)}. Check Outreach history below.`,
+      );
+      return;
+    }
+
+    if (outreachConfigured) {
+      setRecordingEmail(normalized);
+      try {
+        const res = await fetch("/api/outreach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            company: {
+              placeResourceName: row.placeResourceName,
+              name: row.name,
+              email: row.email,
+              phone: row.phone,
+              websiteUrl: row.websiteUrl,
+              address: row.address,
+              emailSource: row.emailSource,
+            },
+            profession: meta?.profession ?? profession,
+            searchCorridor: corridor,
+            radiusMiles,
+            emailSubject: subject,
+            emailBody: body,
+          }),
+        });
+
+        if (res.status === 409) {
+          await refreshOutreachContacts();
+          setOutreachNotice("This email was already contacted.");
+          return;
+        }
+
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          setOutreachNotice(
+            data?.error ??
+              "Could not save to Supabase — opening Gmail anyway.",
+          );
+        } else {
+          const data = (await res.json()) as { contact: OutreachContact };
+          setOutreachContacts((prev) => [data.contact, ...prev]);
+          setOutreachNotice(null);
+        }
+      } catch {
+        setOutreachNotice(
+          "Could not reach Supabase — opening Gmail anyway.",
+        );
+      } finally {
+        setRecordingEmail(null);
+      }
+    }
+
+    openGmailCompose({ to: email, subject, body });
   }
 
   function downloadCsv() {
@@ -754,9 +903,15 @@ export function LeadFinderForm() {
           </label>
 
           <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
-            Template auto-saves in this browser. Replace the bracketed sign-off with
-            your details before sending.
+            Template auto-saves in this browser. Contacts are logged to Supabase
+            when you open Gmail so you never email the same address twice.
           </p>
+
+          {outreachNotice ? (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+              {outreachNotice}
+            </p>
+          ) : null}
         </section>
       ) : null}
 
@@ -863,7 +1018,15 @@ export function LeadFinderForm() {
                 </tr>
               </thead>
               <tbody>
-                {displayRows.map((row) => (
+                {displayRows.map((row) => {
+                  const contacted = row.email
+                    ? contactedByEmail.get(normalizeOutreachEmail(row.email))
+                    : undefined;
+                  const isRecording =
+                    Boolean(row.email) &&
+                    recordingEmail === normalizeOutreachEmail(row.email!);
+
+                  return (
                   <tr
                     key={row.placeResourceName}
                     className={`lead-row-enter border-b border-neutral-100 hover:bg-neutral-50/70 dark:border-neutral-900 dark:hover:bg-neutral-900/50 ${rowSkin(row.review)}`}
@@ -914,22 +1077,34 @@ export function LeadFinderForm() {
                               Shortlisted
                             </span>
                             {row.email ? (
+                              contacted ? (
+                                <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-amber-800 dark:text-amber-300">
+                                  Emailed{" "}
+                                  {formatOutreachDate(contacted.emailed_at)}
+                                </span>
+                              ) : (
                               <a
                                 href={gmailHrefFor(row) ?? "#"}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => {
-                                  if (busy || !row.email) {
+                                  if (
+                                    busy ||
+                                    !row.email ||
+                                    isRecording ||
+                                    contacted
+                                  ) {
                                     e.preventDefault();
                                     return;
                                   }
                                   e.preventDefault();
                                   openGmailForRow(row);
                                 }}
-                                className={`inline-flex w-fit items-center justify-center border border-indigo-300 bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-indigo-950 transition hover:bg-indigo-100 dark:border-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-50 dark:hover:bg-indigo-900/60 ${ACTION_BTN_PRIMARY}`}
+                                className={`inline-flex w-fit items-center justify-center border border-indigo-300 bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-indigo-950 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-50 dark:hover:bg-indigo-900/60 ${ACTION_BTN_PRIMARY}`}
                               >
-                                Open in Gmail
+                                {isRecording ? "Saving…" : "Open in Gmail"}
                               </a>
+                              )
                             ) : (
                               <span className="text-[10px] text-neutral-400">
                                 No email on file
@@ -984,6 +1159,12 @@ export function LeadFinderForm() {
                       {row.email ? (
                         <>
                           <span className="break-all">{row.email}</span>
+                          {contacted ? (
+                            <p className="mt-1 text-[10px] font-semibold text-amber-800 dark:text-amber-300">
+                              Previously emailed{" "}
+                              {formatOutreachDate(contacted.emailed_at)}
+                            </p>
+                          ) : null}
                           {row.emailSource ? (
                             <p className="mt-1 text-[10px] text-neutral-400">
                               {row.emailSource}
@@ -1016,7 +1197,8 @@ export function LeadFinderForm() {
                       )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
             </div>
@@ -1051,6 +1233,15 @@ export function LeadFinderForm() {
           how many sites were skipped.
         </p>
       ) : null}
+
+      <OutreachHistory
+        contacts={outreachContacts}
+        configured={outreachConfigured}
+        loading={outreachLoading}
+        error={outreachError}
+        onRefresh={() => void refreshOutreachContacts()}
+        onUpdate={updateOutreachContact}
+      />
     </div>
   );
 }
