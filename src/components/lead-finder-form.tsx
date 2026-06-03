@@ -26,6 +26,7 @@ import {
 } from "@/lib/outreach-contacts";
 
 import { useOutreach } from "@/components/outreach-provider";
+import { EmailDeliverabilityPanel } from "@/components/email-deliverability-panel";
 
 type EmailScrapeStats = {
   placesCandidates: number;
@@ -896,6 +897,11 @@ export function LeadFinderForm() {
               className={`${CONTROL} resize-y font-mono text-[13px]`}
             />
           </label>
+
+          <EmailDeliverabilityPanel
+            subject={emailSubject}
+            body={emailBody}
+          />
 
           <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
             Template auto-saves in this browser. Contacts are logged to Supabase
